@@ -3,28 +3,23 @@
 /* eslint-disable no-unused-vars */
 
 const express = require('express');
-const { v4: uuidv4 } = require('uuid');
+const xss = require('xss');
 const logger = require('../logger');
-const store = require('../store');
-
 const BookmarksService = require('./bookmarks-service');
-
 
 const bookmarksRouter = express.Router();
 const bodyParser = express.json();
 
-
 const serializeBookmark = bookmark => ({
   id: bookmark.id,
-  title: bookmark.title,
+  title: xss(bookmark.title),
   url: bookmark.url,
-  description: bookmark.description,
+  description: xss(bookmark.description),
   rating: Number(bookmark.rating),
 });
 
 
 
-// GET & POST BOOKMARKS
 bookmarksRouter
   .route('/bookmarks')
   .get((req, res, next) => {
@@ -34,72 +29,85 @@ bookmarksRouter
       })
       .catch(next);
   })
-  .post(bodyParser, (req, res) => {
-  // TODO: update to use db
+  .post(bodyParser, (req, res, next) => {
     for (const field of ['title', 'url', 'rating']) {
       if (!req.body[field]) {
         logger.error(`${field} is required`);
-        return res.status(400).send(`'${field}' is required`);
+        return res.status(400).send({
+          error: { message: `'${field}' is required` }
+        });
       }
     }
+
     const { title, url, description, rating } = req.body;
 
-    if (!Number.isInteger(rating) || rating < 0 || rating > 5) {
+    const ratingNum = Number(rating);
+
+    if (!Number.isInteger(ratingNum) || ratingNum < 0 || ratingNum > 5) {
       logger.error(`Invalid rating '${rating}' supplied`);
-      return res.status(400).send('\'rating\' must be a number between 0 and 5');
+      return res.status(400).send({
+        error: { message: '\'rating\' must be a number between 0 and 5' }
+      });
     }
 
-    const bookmark = { id: uuid(), title, url, description, rating };
+    const newBookmark = { title, url, description, rating };
 
-    store.bookmarks.push(bookmark);
 
-    logger.info(`Bookmark ${bookmark.id} created`);
-    res
-      .status(201)
-      .location(`http://localhost:8000/bookmarks/${bookmark.id}`)
-      .json(bookmark);
+
+
+    BookmarksService.insertBookmark(
+      req.app.get('db'),
+      newBookmark
+    )
+      .then(bookmark => {
+        logger.info(`Bookmark with id ${bookmark.id} created.`);
+        res
+          .status(201)
+          .location(`/bookmarks/${bookmark.id}`)
+          .json(serializeBookmark(bookmark));
+      })
+      .catch(next);
   });
 
 
 
   
-// GET & DELETE BOOKMARKS w/ID
+
 bookmarksRouter
   .route('/bookmarks/:bookmark_id')
-  .get((req, res, next) => {
+  .all((req, res, next) => {
     const { bookmark_id } = req.params;
     BookmarksService.getById(req.app.get('db'), bookmark_id)
       .then(bookmark => {
         if (!bookmark) {
-          logger.error(`Bookmark ${bookmark_id} not found.`);
+          logger.error(`Bookmark with id ${bookmark_id} not found.`);
           return res.status(404).json({
-            error: { message: '404 Not Found' }
+            error: { message: 'Bookmark Not Found' }
           });
         }
-        res.json(serializeBookmark(bookmark));
+        res.bookmark = bookmark;
+        next();
       })
       .catch(next);
   })
-  .delete((req, res) => {
-    // TODO: update to use db
+  .get((req, res) => {
+    res.json(serializeBookmark(res.bookmark));
+  })
+  .delete((req, res, next) => {
     const { bookmark_id } = req.params;
 
-    const bookmarkIndex = store.bookmarks.findIndex(b => b.id === bookmark_id);
-
-    if (bookmarkIndex === -1) {
-      logger.error(`Bookmark with id ${bookmark_id} not found.`);
-      return res
-        .status(404)
-        .send('404 Not Found');
-    }
-
-    store.bookmarks.splice(bookmarkIndex, 1);
-
-    logger.info(`Bookmark ${bookmark_id} deleted.`);
-    res
-      .status(204)
-      .end();
+    BookmarksService.deleteBookmark(
+      req.app.get('db'),
+      bookmark_id
+    )
+      .then(numRowsAffected => {
+        logger.info(`Bookmark with id ${bookmark_id} deleted.`);
+        res.status(204).end();
+      })
+      .catch(next);
   });
+
+
 
 
 module.exports = bookmarksRouter;
